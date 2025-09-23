@@ -37,12 +37,84 @@ model = genai.GenerativeModel("gemini-1.5-flash")
 
 app.config['UPLOAD_FOLDER'] = './uploads' 
 
-# Load the trained model
-yield_model = joblib.load("crop_yield_model.pkl")
+class ModifiedSVR:
+    def __init__(self, C=1.0, base_epsilon=0.05, delta=0.02, lambda1=0.0, lr=0.005,
+                 n_iter=3000, batch_size=16, random_state=0, early_stopping=False, stop_patience=500):
+        self.C = C
+        self.base_epsilon = base_epsilon
+        self.delta = delta
+        self.lambda1 = lambda1
+        self.lr = lr
+        self.n_iter = n_iter
+        self.batch_size = batch_size
+        self.rng = np.random.RandomState(random_state)
+        self.w = None
+        self.b = 0.0
+        self.early_stopping = early_stopping
+        self.stop_patience = stop_patience
 
-# Load the model columns saved during training
-with open("model_columns.json", "r") as f:
-    model_columns = json.load(f)
+    def fit(self, X, y, X_val=None, y_val=None):
+        n_samples, n_features = X.shape
+        if self.w is None:
+            self.w = np.zeros(n_features)
+        m = np.zeros_like(self.w); v = np.zeros_like(self.w)
+        mb = 0.0; vb = 0.0
+        beta1, beta2, eps_adam = 0.9, 0.999, 1e-8
+        best_val_loss = np.inf; best_wb = None; patience = 0
+
+        for it in range(1, self.n_iter + 1):
+            idx = self.rng.choice(n_samples, size=min(self.batch_size, n_samples), replace=False)
+            Xb = X[idx]; yb = y[idx]
+            preds = Xb.dot(self.w) + self.b
+            resid = yb - preds
+            t = np.abs(resid) - self.base_epsilon
+            dL_df = np.where(t <= 0, 0.0, np.where(t <= self.delta, -(t/self.delta)*np.sign(resid), -np.sign(resid)))
+            grad_w = self.w.copy()
+            if self.lambda1 != 0.0:
+                grad_w += self.lambda1 * (self.w / (np.sqrt(self.w**2 + 1e-8)))
+            grad_w += self.C * (dL_df[:,None] * Xb).sum(axis=0)
+            grad_b = self.C * dL_df.sum()
+
+            # Adam updates
+            m = beta1*m + (1-beta1)*grad_w
+            v = beta2*v + (1-beta2)*(grad_w**2)
+            m_hat = m / (1 - beta1**it)
+            v_hat = v / (1 - beta2**it)
+            self.w -= self.lr * m_hat / (np.sqrt(v_hat) + eps_adam)
+            mb = beta1*mb + (1-beta1)*grad_b
+            vb = beta2*vb + (1-beta2)*(grad_b**2)
+            mb_hat = mb / (1 - beta1**it)
+            vb_hat = vb / (1 - beta2**it)
+            self.b -= self.lr * mb_hat / (np.sqrt(vb_hat) + eps_adam)
+
+            # validation
+            if (it % 200 == 0 or it == 1) and (X_val is not None and y_val is not None):
+                vpred = X_val.dot(self.w) + self.b
+                vr = y_val - vpred
+                vt = np.abs(vr) - self.base_epsilon
+                vloss_terms = np.where(vt <= 0, 0.0, np.where(vt <= self.delta, vt**2/(2*self.delta), vt - self.delta/2))
+                val_loss = 0.5*np.sum(self.w**2) + self.lambda1*np.sum(np.sqrt(self.w**2 + 1e-8)) + self.C*np.sum(vloss_terms)
+                if val_loss < best_val_loss - 1e-9:
+                    best_val_loss = val_loss
+                    best_wb = (self.w.copy(), self.b)
+                    patience = 0
+                else:
+                    patience += 200
+                if self.early_stopping and patience >= self.stop_patience:
+                    break
+        if best_wb is not None:
+            self.w, self.b = best_wb
+
+    def predict(self, X):
+        return X.dot(self.w) + self.b
+
+stacked_pipeline = joblib.load("full_stacked_pipeline.pkl")
+model_columns = stacked_pipeline["model_columns"]
+
+# Helper: convert scaled logy -> raw yield
+def scaled_logy_to_raw(y_scaled_array):
+    inv = stacked_pipeline["scaler_y"].inverse_transform(np.array(y_scaled_array).reshape(-1,1)).ravel()
+    return np.expm1(inv)
 
 # A simple mapping for state climate data (can be enhanced)
 states_climate = {
@@ -52,6 +124,7 @@ states_climate = {
     "Maharashtra":    {"AvgTemperature(C)": 28, "AnnualRainfall(mm)": 1000},
     "West Bengal":    {"AvgTemperature(C)": 29, "AnnualRainfall(mm)": 1500},
 }
+
 
 
 
@@ -473,59 +546,92 @@ def get_state_from_coordinates(latitude, longitude):
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    data = request.json
-    if not data:
-        return jsonify({"error": "No JSON payload received"}), 400
-
-    def safe_float(value):
-        try:
-            return float(value)
-        except:
-            return 0.0
-
-    crop_type = data.get("cropType", "")
-    land_size = safe_float(data.get("landSize"))
-    fertilizer = safe_float(data.get("fertilizer"))
-    pesticide = safe_float(data.get("pesticide"))
-    latitude = safe_float(data.get("latitude"))
-    longitude = safe_float(data.get("longitude"))
-
-    state = get_state_from_coordinates(latitude, longitude)
-    if not state:
-        return jsonify({"error": "Could not determine state from coordinates"}), 400
-
-    avg_temp = states_climate.get(state, {"AvgTemperature(C)": 25})["AvgTemperature(C)"]
-    annual_rainfall = states_climate.get(state, {"AnnualRainfall(mm)": 700})["AnnualRainfall(mm)"]
-
-    input_dict = {
-        "Year": [2024],
-        "LandSize(ha)": [land_size],
-        "FertilizerUsage(kg_ha)": [fertilizer],
-        "PesticideUsage(kg_ha)": [pesticide],
-        "AvgTemperature(C)": [avg_temp],
-        "AnnualRainfall(mm)": [annual_rainfall],
-        "State_Haryana": [1 if state == "Haryana" else 0],
-        "State_Maharashtra": [1 if state == "Maharashtra" else 0],
-        "State_Punjab": [1 if state == "Punjab" else 0],
-        "State_Uttar Pradesh": [1 if state == "Uttar Pradesh" else 0],
-        "State_West Bengal": [1 if state == "West Bengal" else 0],
-        "CropType_Rice": [1 if crop_type == "Rice" else 0],
-        "CropType_Wheat": [1 if crop_type == "Wheat" else 0],
-        "CropType_Maize": [1 if crop_type == "Maize" else 0]
-    }
-
     try:
-        input_df = pd.DataFrame(input_dict)[model_columns]
-    except Exception as e:
-        print("Column mismatch error:", e)
-        return jsonify({"error": f"Column mismatch: {str(e)}"}), 400
+        data = request.json
+        if not data:
+            return jsonify({"error": "No JSON payload received"}), 400
 
-    try:
-        prediction = yield_model.predict(input_df)[0]
-        return jsonify({"predicted_yield": round(float(prediction), 2)})
+        # Safe float parser
+        def safe_float(val):
+            try:
+                return float(val)
+            except:
+                return 0.0
+
+        crop_type = data.get("cropType", "")
+        land_size = safe_float(data.get("landSize"))
+        fertilizer = safe_float(data.get("fertilizer"))
+        pesticide = safe_float(data.get("pesticide"))
+        latitude = safe_float(data.get("latitude"))
+        longitude = safe_float(data.get("longitude"))
+        year = safe_float(data.get("year", 2024))
+
+        # Simple climate mapping
+        states_climate = {
+            "Punjab": {"AvgTemperature(C)": 25, "AnnualRainfall(mm)": 650},
+            "Haryana": {"AvgTemperature(C)": 26, "AnnualRainfall(mm)": 600},
+            "Uttar Pradesh": {"AvgTemperature(C)": 27, "AnnualRainfall(mm)": 900},
+            "Maharashtra": {"AvgTemperature(C)": 28, "AnnualRainfall(mm)": 1000},
+            "West Bengal": {"AvgTemperature(C)": 29, "AnnualRainfall(mm)": 1500},
+        }
+
+        state = get_state_from_coordinates(latitude, longitude)
+        climate = states_climate.get(state, {"AvgTemperature(C)": 25, "AnnualRainfall(mm)": 700})
+
+        # Build input dataframe
+        input_dict = {
+            "Year": [year],
+            "LandSize(ha)": [land_size],
+            "FertilizerUsage(kg_ha)": [fertilizer],
+            "PesticideUsage(kg_ha)": [pesticide],
+            "AvgTemperature(C)": [climate["AvgTemperature(C)"]],
+            "AnnualRainfall(mm)": [climate["AnnualRainfall(mm)"]],
+            "State_Haryana": [1 if state=="Haryana" else 0],
+            "State_Maharashtra": [1 if state=="Maharashtra" else 0],
+            "State_Punjab": [1 if state=="Punjab" else 0],
+            "State_Uttar Pradesh": [1 if state=="Uttar Pradesh" else 0],
+            "State_West Bengal": [1 if state=="West Bengal" else 0],
+            "CropType_Maize": [1 if crop_type=="Maize" else 0],
+            "CropType_Rice": [1 if crop_type=="Rice" else 0],
+            "CropType_Wheat": [1 if crop_type=="Wheat" else 0],
+        }
+
+        input_df = pd.DataFrame(input_dict)
+        # Ensure correct column order
+        for col in model_columns:
+            if col not in input_df.columns:
+                input_df[col] = 0
+        input_df = input_df[model_columns]
+
+        # -------------------------
+        # Preprocess & predict using full stacked pipeline
+        # -------------------------
+        X_s1 = stacked_pipeline["scaler_X1"].transform(input_df)
+        X_poly = stacked_pipeline["poly"].transform(X_s1)
+        X_final = stacked_pipeline["scaler_X2"].transform(X_poly)
+
+        # Base model predictions
+        ridge_pred = stacked_pipeline["ridge"].predict(X_final)
+        rf_pred = stacked_pipeline["rf"].predict(X_final)
+        gb_pred = stacked_pipeline["gb"].predict(X_final)
+        svr_pred = stacked_pipeline["svr"].predict(X_final)
+
+        # Convert RF & GB to scaled logy
+        rf_pred_scaled = stacked_pipeline["scaler_y"].transform(np.log1p(rf_pred).reshape(-1,1)).ravel()
+        gb_pred_scaled = stacked_pipeline["scaler_y"].transform(np.log1p(gb_pred).reshape(-1,1)).ravel()
+
+        # Meta input
+        meta_input = np.column_stack([ridge_pred, rf_pred_scaled, gb_pred_scaled, svr_pred])
+        stack_pred_scaled = stacked_pipeline["meta_model"].predict(meta_input)
+        stack_pred_raw = scaled_logy_to_raw(stack_pred_scaled)
+
+        return jsonify({"predicted_yield": round(float(stack_pred_raw[0]), 2)})
+
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": str(e)}), 500
+
+
     
 
 @app.route('/submit-complaint', methods=['POST'])
