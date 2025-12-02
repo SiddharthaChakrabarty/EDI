@@ -4,11 +4,12 @@ import React from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
-const CropDetailCard = ({ name, ename, confidence, explanation }) => {
+const CropDetailCard = ({ name, ename, confidence, explanation, isTop }) => {
   const { t } = useTranslation();
   const navigate = useNavigate();
 
   const handleClick = () => {
+    if (!ename) return;
     navigate(`/crop-detail/${ename}`);
   };
 
@@ -19,14 +20,34 @@ const CropDetailCard = ({ name, ename, confidence, explanation }) => {
 
   const hasExplanation = explanation && typeof explanation === 'object';
 
+  const baseCardClasses =
+    'relative bg-white border border-gray-200 rounded-xl shadow-lg p-6 text-left ' +
+    'transition-transform duration-300 ease-in-out transform hover:-translate-y-2 hover:shadow-2xl cursor-pointer';
+
+  const topCardExtra =
+    'border-green-500 ring-2 ring-green-100 md:p-7';
+  const normalCardExtra = 'm-1';
+
   return (
     <div
-      className="relative bg-white border border-gray-200 rounded-xl shadow-lg p-6 m-4 max-w-[360px] text-left
-                 transition-transform duration-300 ease-in-out transform hover:-translate-y-2 hover:shadow-2xl cursor-pointer"
+      className={`${baseCardClasses} ${
+        isTop ? topCardExtra : normalCardExtra
+      }`}
       onClick={handleClick}
     >
+      {/* Top badge for main recommendation */}
+      {isTop && (
+        <div className="absolute -top-3 left-4 bg-green-600 text-white text-xs font-semibold px-3 py-1 rounded-full shadow">
+          {t('Top recommendation')}
+        </div>
+      )}
+
       {/* Title */}
-      <h3 className="text-xl font-bold text-gray-800 mb-1 text-center">
+      <h3
+        className={`${
+          isTop ? 'text-2xl' : 'text-xl'
+        } font-bold text-gray-800 mb-1 text-center`}
+      >
         {t(name)}
       </h3>
 
@@ -35,8 +56,8 @@ const CropDetailCard = ({ name, ename, confidence, explanation }) => {
         {t('Model confidence')}: <span className="font-semibold">{confPct}</span>
       </p>
 
-      {/* Explanation for TOP crop only */}
-      {hasExplanation ? (
+      {/* Full explanation for TOP crop only */}
+      {isTop && hasExplanation ? (
         <div className="mt-3 bg-green-50 border border-green-200 rounded-lg p-4">
           {/* Summary */}
           {explanation.summary && (
@@ -78,18 +99,19 @@ const CropDetailCard = ({ name, ename, confidence, explanation }) => {
             )}
 
           {/* Risks */}
-          {Array.isArray(explanation.risks) && explanation.risks.length > 0 && (
-            <div className="mb-2">
-              <p className="text-xs font-semibold text-red-800 mb-1">
-                {t('Risks')}
-              </p>
-              <ul className="list-disc list-inside text-xs text-gray-800 space-y-1">
-                {explanation.risks.map((item, idx) => (
-                  <li key={idx}>{item}</li>
-                ))}
-              </ul>
-            </div>
-          )}
+          {Array.isArray(explanation.risks) &&
+            explanation.risks.length > 0 && (
+              <div className="mb-2">
+                <p className="text-xs font-semibold text-red-800 mb-1">
+                  {t('Risks')}
+                </p>
+                <ul className="list-disc list-inside text-xs text-gray-800 space-y-1">
+                  {explanation.risks.map((item, idx) => (
+                    <li key={idx}>{item}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
 
           {/* Disclaimers */}
           {Array.isArray(explanation.disclaimers) &&
@@ -107,12 +129,18 @@ const CropDetailCard = ({ name, ename, confidence, explanation }) => {
             )}
         </div>
       ) : (
+        // Compact state for non-top cards
         <p className="text-gray-600 text-sm mt-2 text-center">
           {t('Tap to view growing steps')}
         </p>
       )}
     </div>
   );
+};
+
+CropDetailCard.defaultProps = {
+  isTop: false,
+  explanation: null,
 };
 
 export default CropDetailCard;

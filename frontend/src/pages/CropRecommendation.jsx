@@ -20,17 +20,19 @@ const CropRecommendation = () => {
 
   const [recommendations, setRecommendations] = useState([]);
   const [topExplanation, setTopExplanation] = useState(null);
-  const [loading, setLoading]   = useState(false);
-  const [error, setError]       = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
 
   // Load language + stored location, and auto-fetch if location exists
   useEffect(() => {
     const language = localStorage.getItem('languagePreference') || 'en';
     i18n
       .changeLanguage(language)
-      .catch(err => setError(t('errorChangingLanguage', { err: err.message })));
+      .catch(err =>
+        setError(t('errorChangingLanguage', { err: err.message }))
+      );
 
-    const storedLatitude  = localStorage.getItem('latitude');
+    const storedLatitude = localStorage.getItem('latitude');
     const storedLongitude = localStorage.getItem('longitude');
 
     if (storedLatitude && storedLongitude) {
@@ -49,7 +51,7 @@ const CropRecommendation = () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleChange = (e) => {
+  const handleChange = e => {
     const { name, value } = e.target;
     setForm(prev => ({ ...prev, [name]: value }));
   };
@@ -61,14 +63,14 @@ const CropRecommendation = () => {
     }
     setError(null);
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
+      pos => {
         const lat = pos.coords.latitude.toFixed(5);
         const lon = pos.coords.longitude.toFixed(5);
         setForm(prev => ({ ...prev, latitude: lat, longitude: lon }));
         localStorage.setItem('latitude', lat);
         localStorage.setItem('longitude', lon);
       },
-      (err) => {
+      err => {
         console.error(err);
         setError(t('Unable to fetch current location.'));
       }
@@ -92,15 +94,25 @@ const CropRecommendation = () => {
       const { ph, N, P, K } = soilOverrides;
       if (ph && N && P && K) {
         payload.ph = ph;
-        payload.N  = N;
-        payload.P  = P;
-        payload.K  = K;
+        payload.N = N;
+        payload.P = P;
+        payload.K = K;
       }
 
-      const res = await axios.post('http://127.0.0.1:5000/recommendations', payload);
+      const res = await axios.post(
+        'http://127.0.0.1:5000/recommendations',
+        payload
+      );
       const data = res.data;
 
-      setRecommendations(data.Recommendations || []);
+      let recs = data.Recommendations || [];
+
+      // Sort by confidence descending (extra safety)
+      recs = [...recs].sort(
+        (a, b) => (b.confidence || 0) - (a.confidence || 0)
+      );
+
+      setRecommendations(recs);
       setTopExplanation(data.top_explanation?.details || null);
     } catch (err) {
       console.error('Error fetching recommendations:', err);
@@ -110,7 +122,7 @@ const CropRecommendation = () => {
     }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = e => {
     e.preventDefault();
     if (!form.latitude || !form.longitude) {
       setError(t('locationNotAvailable'));
@@ -127,6 +139,11 @@ const CropRecommendation = () => {
       K: form.K,
     });
   };
+
+  // Split into top + remaining for layout
+  const topRec = recommendations.length > 0 ? recommendations[0] : null;
+  const otherRecs =
+    recommendations.length > 1 ? recommendations.slice(1) : [];
 
   return (
     <>
@@ -254,27 +271,48 @@ const CropRecommendation = () => {
         )}
 
         {error && (
-          <p className="text-center text-red-500 text-lg mb-4">
-            {error}
-          </p>
+          <p className="text-center text-red-500 text-lg mb-4">{error}</p>
         )}
 
-        {/* Cards */}
-        <div className="flex flex-wrap justify-center gap-5 mt-4">
-          {recommendations.map((rec, index) => (
-            <CropDetailCard
-              key={rec.ename || rec.name || index}
-              name={rec.name}
-              ename={rec.ename}
-              confidence={rec.confidence}
-              explanation={index === 0 ? topExplanation : null}  // only top crop gets full explanation
-            />
-          ))}
-        </div>
+        {/* Recommendation layout */}
+        {!loading && !error && recommendations.length > 0 && (
+          <div className="mt-6 space-y-6">
+            {/* Top card – primary recommendation */}
+            {topRec && (
+              <div className="w-full max-w-3xl mx-auto">
+                <CropDetailCard
+                  isTop
+                  name={topRec.name}
+                  ename={topRec.ename}
+                  confidence={topRec.confidence}
+                  explanation={topExplanation}
+                />
+              </div>
+            )}
+
+            {/* Remaining cards below in two-column grid */}
+            {otherRecs.length > 0 && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 max-w-5xl mx-auto">
+                {otherRecs.map((rec, index) => (
+                  <CropDetailCard
+                    key={rec.ename || rec.name || index}
+                    name={rec.name}
+                    ename={rec.ename}
+                    confidence={rec.confidence}
+                    explanation={null}
+                    isTop={false}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {!loading && !error && recommendations.length === 0 && (
           <p className="text-center text-gray-500 mt-6">
-            {t('No recommendations yet. Please enter your location and submit.')}
+            {t(
+              'No recommendations yet. Please enter your location and submit.'
+            )}
           </p>
         )}
       </div>
